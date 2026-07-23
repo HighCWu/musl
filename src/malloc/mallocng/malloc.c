@@ -6,7 +6,6 @@
 #include <errno.h>
 
 void *sbrk(intptr_t);
-int brk(void *);
 
 #include "meta.h"
 
@@ -221,7 +220,7 @@ static struct meta *alloc_group(int sc, size_t req)
 		}
 
 #ifdef __wasm__
-		p = sbrk(needed);
+		p = __malloc_map_alloc(needed);
 #else
 		p = mmap(0, needed, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
 #endif
@@ -295,7 +294,7 @@ void *malloc(size_t n)
 			unlock();
 			return 0;
 		}
-		void *p = sbrk(needed);
+		void *p = __malloc_map_alloc(needed);
 		if (p==MAP_FAILED) {
 			free_meta(g);
 			unlock();
