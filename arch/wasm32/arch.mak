@@ -1,5 +1,6 @@
 CC = clang
 WASM_BITS ?= 32
+LDSO_ARCH = wasm$(WASM_BITS)
 CFLAGS += --target=wasm$(WASM_BITS) -matomics -mbulk-memory
 LDFLAGS =
 CROSS_COMPILE = llvm-
