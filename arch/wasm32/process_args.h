@@ -1,5 +1,5 @@
-#ifndef _WASM32_PROCESS_ARGS_H
-#define _WASM32_PROCESS_ARGS_H
+#ifndef _WASM_PROCESS_ARGS_H
+#define _WASM_PROCESS_ARGS_H
 
 struct wasm_process_args {
 	int len, envc, argc;

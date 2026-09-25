@@ -5,8 +5,14 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-__asm__(".globaltype __stack_pointer, i32\n");
-__asm__(".globaltype __tls_base, i32\n");
+#if __SIZEOF_POINTER__ == 8
+#define WASM_POINTER_TYPE "i64"
+#else
+#define WASM_POINTER_TYPE "i32"
+#endif
+
+__asm__(".globaltype __stack_pointer, " WASM_POINTER_TYPE "\n");
+__asm__(".globaltype __tls_base, " WASM_POINTER_TYPE "\n");
 
 static inline void set_stack_pointer(void *ptr)
 {

@@ -1,6 +1,10 @@
+#if __SIZEOF_LONG__ == 4
 #define __SYSCALL_LL_E(x) \
 ((union { long long ll; long l[2]; }){ .ll = x }).l[0], \
 ((union { long long ll; long l[2]; }){ .ll = x }).l[1]
+#else
+#define __SYSCALL_LL_E(x) (x)
+#endif
 #define __SYSCALL_LL_O(x) __SYSCALL_LL_E(x)
 
 __attribute__((import_module("linux"), import_name("syscall")))

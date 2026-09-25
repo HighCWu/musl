@@ -3,7 +3,13 @@
 #define _Reg long
 
 #define __BYTE_ORDER 1234
+#if __SIZEOF_LONG__ == 4
 #define __LONG_MAX 0x7fffffffL
+#elif __SIZEOF_LONG__ == 8
+#define __LONG_MAX 0x7fffffffffffffffL
+#else
+#error unsupported wasm long ABI
+#endif
 
 #ifndef __cplusplus
 #ifdef __WCHAR_TYPE__

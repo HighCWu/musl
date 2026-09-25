@@ -8,7 +8,7 @@
 	(__LDBL_MANT_DIG__ != 113 || __LDBL_DIG__ != 33 || \
 	__LDBL_DECIMAL_DIG__ != 36 || __LDBL_MAX_EXP__ != 16384 || \
 	__SIZEOF_LONG_DOUBLE__ != 16)
-#error unsupported wasm32 long double ABI
+#error unsupported wasm long double ABI
 #endif
 
 #define LDBL_TRUE_MIN 6.47517511943802511092443895822764655e-4966L

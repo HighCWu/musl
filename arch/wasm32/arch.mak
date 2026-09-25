@@ -1,5 +1,6 @@
 CC = clang
-CFLAGS += --target=wasm32 -matomics -mbulk-memory
+WASM_BITS ?= 32
+CFLAGS += --target=wasm$(WASM_BITS) -matomics -mbulk-memory
 LDFLAGS =
 CROSS_COMPILE = llvm-
 LIBCC =
