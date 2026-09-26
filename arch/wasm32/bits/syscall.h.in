@@ -14,6 +14,9 @@
 #define __NR_add_key 217
 #define __NR_adjtimex 171
 #define __NR_arch_specific_syscall 244
+#define __NR_mmap 222
+#define __NR_mmap2 222
+#define __NR_munmap 215
 #define __NR_bind 200
 #define __NR_bpf 280
 #define __NR_capget 90

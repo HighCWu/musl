@@ -33,50 +33,41 @@ struct wasm_mapping {
 static pthread_mutex_t mappings_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct wasm_mapping *mappings;
 
-void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
+/*
+ * The Linux syscall wrapper validates the public mmap arguments, then calls
+ * this process-local allocator through the Wasm execution ABI.  Keeping the
+ * metadata in user memory makes fork's existing linear-memory copy sufficient
+ * and, crucially, shares the same brk-backed malloc arena instead of creating
+ * a second allocator that could overlap it.
+ */
+long __wasm_mmap(size_t rounded)
 {
-	const int supported_flags = MAP_PRIVATE | MAP_ANONYMOUS;
 	struct wasm_mapping *mapping;
 	struct wasm_allocation *allocation;
 	uintptr_t allocation_start, address;
-	size_t rounded, total;
+	size_t total;
 	int lock_error;
 
-	if (!len || off || fd != -1 || (flags & MAP_TYPE) != MAP_PRIVATE ||
-	    !(flags & MAP_ANONYMOUS)) {
-		errno = EINVAL;
-		return MAP_FAILED;
-	}
-	if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
-		errno = ENOMEM;
-		return MAP_FAILED;
-	}
-	if ((flags & ~supported_flags) ||
-	    prot != (PROT_READ | PROT_WRITE)) {
-		errno = EINVAL;
-		return MAP_FAILED;
-	}
-	if (len > SIZE_MAX - (PAGESIZE - 1)) {
-		errno = ENOMEM;
-		return MAP_FAILED;
-	}
-	rounded = (len + PAGESIZE - 1) & -(size_t)PAGESIZE;
-	if (rounded > SIZE_MAX - PAGESIZE - sizeof(*allocation)) {
-		errno = ENOMEM;
-		return MAP_FAILED;
-	}
+	if (!rounded || (rounded & (PAGESIZE - 1)) ||
+	    rounded > SIZE_MAX - PAGESIZE - sizeof(*allocation))
+		return -ENOMEM;
 	total = rounded + PAGESIZE + sizeof(*allocation);
 	allocation = __libc_malloc(total);
 	if (!allocation)
-		return MAP_FAILED;
+		return errno ? -errno : -ENOMEM;
 	mapping = __libc_malloc(sizeof(*mapping));
 	if (!mapping) {
 		__libc_free(allocation);
-		return MAP_FAILED;
+		return errno ? -errno : -ENOMEM;
 	}
 
 	allocation_start = (uintptr_t)(allocation + 1);
 	address = (allocation_start + PAGESIZE - 1) & -(uintptr_t)PAGESIZE;
+	if (address >= (uintptr_t)-4095) {
+		__libc_free(mapping);
+		__libc_free(allocation);
+		return -ENOMEM;
+	}
 	allocation->next_free = 0;
 	allocation->references = 1;
 	mapping->allocation = allocation;
@@ -88,44 +79,33 @@ void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
 	if (lock_error) {
 		__libc_free(mapping);
 		__libc_free(allocation);
-		errno = lock_error;
-		return MAP_FAILED;
+		return -lock_error;
 	}
 	mapping->next = mappings;
 	mappings = mapping;
 	(void)pthread_mutex_unlock(&mappings_lock);
 
-	(void)start;
-	return mapping->address;
+	return (long)mapping->address;
 }
 
-hidden int __wasm_munmap(void *start, size_t len)
+long __wasm_munmap(uintptr_t begin, size_t rounded)
 {
 	struct wasm_mapping **cursor, *mapping, *removed = 0;
 	struct wasm_mapping *spare;
 	struct wasm_allocation *allocation, *released = 0;
-	uintptr_t begin = (uintptr_t)start, end;
-	size_t rounded;
+	uintptr_t end;
 	int lock_error;
 
-	if ((uintptr_t)start & (PAGESIZE - 1) || !len ||
-	    len > SIZE_MAX - (PAGESIZE - 1)) {
-		errno = EINVAL;
-		return -1;
-	}
-	rounded = (len + PAGESIZE - 1) & -(size_t)PAGESIZE;
-	if (begin > UINTPTR_MAX - rounded) {
-		errno = EINVAL;
-		return -1;
-	}
+	if ((begin & (PAGESIZE - 1)) || !rounded ||
+	    (rounded & (PAGESIZE - 1)) || begin > UINTPTR_MAX - rounded)
+		return -EINVAL;
 	end = begin + rounded;
 	spare = __libc_malloc(sizeof(*spare));
 
 	lock_error = pthread_mutex_lock(&mappings_lock);
 	if (lock_error) {
 		__libc_free(spare);
-		errno = lock_error;
-		return -1;
+		return -lock_error;
 	}
 	for (cursor = &mappings; (mapping = *cursor); ) {
 		uintptr_t mapping_begin = (uintptr_t)mapping->address;
@@ -159,8 +139,7 @@ hidden int __wasm_munmap(void *start, size_t len)
 		}
 		if (!spare) {
 			(void)pthread_mutex_unlock(&mappings_lock);
-			errno = ENOMEM;
-			return -1;
+			return -ENOMEM;
 		}
 		spare->next = mapping->next;
 		spare->allocation = mapping->allocation;
@@ -188,7 +167,8 @@ hidden int __wasm_munmap(void *start, size_t len)
 	return 0;
 }
 
-#else
+#endif
+
 void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
 {
 	long ret;
@@ -213,6 +193,5 @@ void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
 		ret = -ENOMEM;
 	return (void *)__syscall_ret(ret);
 }
-#endif
 
 weak_alias(__mmap, mmap);
