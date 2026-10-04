@@ -35,47 +35,96 @@ struct wasm_mapping {
 static pthread_mutex_t mappings_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct wasm_mapping *mappings;
 
-static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
-			      int exact, struct wasm_mapping *mapping,
-			      long *result)
+#define WASM_MMAP_CHUNK_SIZE (8 * PAGESIZE)
+
+static uintptr_t wasm_find_free(struct wasm_allocation *allocation,
+				size_t rounded)
+{
+	uintptr_t begin = (uintptr_t)allocation->address;
+	uintptr_t address = begin;
+
+	while (rounded <= allocation->length &&
+	       address - begin <= allocation->length - rounded) {
+		struct wasm_mapping *current;
+		uintptr_t end = address + rounded;
+		uintptr_t next = address;
+
+		for (current = mappings; current; current = current->next) {
+			uintptr_t mapping_begin, mapping_end;
+
+			if (current->allocation != allocation)
+				continue;
+			mapping_begin = (uintptr_t)current->address;
+			mapping_end = mapping_begin + current->length;
+			if (address < mapping_end && mapping_begin < end &&
+			    mapping_end > next)
+				next = mapping_end;
+		}
+		if (next == address)
+			return address;
+		address = next;
+	}
+	return 0;
+}
+
+static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
+				  int exact, struct wasm_mapping *mapping,
+				  long *result)
 {
 	struct wasm_allocation *allocation = 0;
 	struct wasm_mapping *current;
-	uintptr_t address, end;
-	int lock_error;
+	uintptr_t address = 0, end;
+	int contained = 0, lock_error;
 
-	if (!requested)
-		return exact ? -ENOMEM : 0;
-	address = requested & -(uintptr_t)PAGESIZE;
-	if (address >= (uintptr_t)-4095 || rounded > UINTPTR_MAX - address)
-		return exact ? -ENOMEM : 0;
-	end = address + rounded;
+	if (!requested && exact)
+		return -ENOMEM;
+	if (requested) {
+		address = requested & -(uintptr_t)PAGESIZE;
+		if (address >= (uintptr_t)-4095 ||
+		    rounded > UINTPTR_MAX - address)
+			return exact ? -ENOMEM : 0;
+		end = address + rounded;
+	}
 
 	lock_error = pthread_mutex_lock(&mappings_lock);
 	if (lock_error)
 		return -lock_error;
-	for (current = mappings; current; current = current->next) {
+	for (current = mappings; requested && current; current = current->next) {
 		struct wasm_allocation *candidate = current->allocation;
 		uintptr_t allocation_begin = (uintptr_t)candidate->address;
 
 		if (address >= allocation_begin && rounded <= candidate->length &&
 		    address - allocation_begin <= candidate->length - rounded) {
 			allocation = candidate;
+			contained = 1;
 			break;
 		}
 	}
-	if (!allocation) {
-		(void)pthread_mutex_unlock(&mappings_lock);
-		return exact ? -ENOMEM : 0;
-	}
-	for (current = mappings; current; current = current->next) {
+	for (current = mappings; allocation && current; current = current->next) {
 		uintptr_t mapping_begin = (uintptr_t)current->address;
 		uintptr_t mapping_end = mapping_begin + current->length;
 
 		if (address < mapping_end && mapping_begin < end) {
-			(void)pthread_mutex_unlock(&mappings_lock);
-			return exact ? -EEXIST : 0;
+			allocation = 0;
+			break;
 		}
+	}
+	if (!allocation && exact) {
+		(void)pthread_mutex_unlock(&mappings_lock);
+		return contained ? -EEXIST : -ENOMEM;
+	}
+	if (!allocation) {
+		for (current = mappings; current; current = current->next) {
+			address = wasm_find_free(current->allocation, rounded);
+			if (address) {
+				allocation = current->allocation;
+				break;
+			}
+		}
+	}
+	if (!allocation) {
+		(void)pthread_mutex_unlock(&mappings_lock);
+		return 0;
 	}
 
 	memset((void *)address, 0, rounded);
@@ -103,7 +152,7 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	struct wasm_mapping *mapping;
 	struct wasm_allocation *allocation;
 	uintptr_t allocation_start, address;
-	size_t total;
+	size_t capacity, total;
 	long result;
 	int hint_status, lock_error;
 
@@ -113,8 +162,8 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	mapping = __libc_malloc(sizeof(*mapping));
 	if (!mapping)
 		return errno ? -errno : -ENOMEM;
-	hint_status = wasm_try_mmap_hint(requested, rounded, exact, mapping,
-					 &result);
+	hint_status = wasm_try_mmap_existing(requested, rounded, exact, mapping,
+					     &result);
 	if (hint_status > 0)
 		return result;
 	if (hint_status < 0) {
@@ -122,8 +171,14 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 		return hint_status;
 	}
 
-	total = rounded + PAGESIZE + sizeof(*allocation);
+	capacity = rounded < WASM_MMAP_CHUNK_SIZE ? WASM_MMAP_CHUNK_SIZE : rounded;
+	total = capacity + PAGESIZE + sizeof(*allocation);
 	allocation = __libc_malloc(total);
+	if (!allocation && capacity != rounded) {
+		capacity = rounded;
+		total = capacity + PAGESIZE + sizeof(*allocation);
+		allocation = __libc_malloc(total);
+	}
 	if (!allocation) {
 		__libc_free(mapping);
 		return errno ? -errno : -ENOMEM;
@@ -139,7 +194,7 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	allocation->next_free = 0;
 	allocation->references = 1;
 	allocation->address = (void *)address;
-	allocation->length = rounded;
+	allocation->length = capacity;
 	mapping->allocation = allocation;
 	mapping->address = (void *)address;
 	mapping->length = rounded;
