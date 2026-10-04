@@ -88,6 +88,24 @@ long __wasm_mmap(size_t rounded)
 	return (long)mapping->address;
 }
 
+/*
+ * Version 2 carries the complete mapping request across the execution ABI.
+ * The current allocator still implements only the direct anonymous subset
+ * validated by Linux, so address placement and the remaining arguments are
+ * intentionally advisory here.  Keeping the old export preserves execution
+ * of modules built against the first ABI.
+ */
+long __wasm_mmap_v2(uintptr_t address, size_t rounded, int prot, int flags,
+		    int fd, uintptr_t pgoff)
+{
+	(void)address;
+	(void)prot;
+	(void)flags;
+	(void)fd;
+	(void)pgoff;
+	return __wasm_mmap(rounded);
+}
+
 long __wasm_munmap(uintptr_t begin, size_t rounded)
 {
 	struct wasm_mapping **cursor, *mapping, *removed = 0;
