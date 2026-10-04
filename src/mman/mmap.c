@@ -36,7 +36,8 @@ static pthread_mutex_t mappings_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct wasm_mapping *mappings;
 
 static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
-			      struct wasm_mapping *mapping, long *result)
+			      int exact, struct wasm_mapping *mapping,
+			      long *result)
 {
 	struct wasm_allocation *allocation = 0;
 	struct wasm_mapping *current;
@@ -44,10 +45,10 @@ static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
 	int lock_error;
 
 	if (!requested)
-		return 0;
+		return exact ? -ENOMEM : 0;
 	address = requested & -(uintptr_t)PAGESIZE;
 	if (address >= (uintptr_t)-4095 || rounded > UINTPTR_MAX - address)
-		return 0;
+		return exact ? -ENOMEM : 0;
 	end = address + rounded;
 
 	lock_error = pthread_mutex_lock(&mappings_lock);
@@ -65,7 +66,7 @@ static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
 	}
 	if (!allocation) {
 		(void)pthread_mutex_unlock(&mappings_lock);
-		return 0;
+		return exact ? -ENOMEM : 0;
 	}
 	for (current = mappings; current; current = current->next) {
 		uintptr_t mapping_begin = (uintptr_t)current->address;
@@ -73,7 +74,7 @@ static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
 
 		if (address < mapping_end && mapping_begin < end) {
 			(void)pthread_mutex_unlock(&mappings_lock);
-			return 0;
+			return exact ? -EEXIST : 0;
 		}
 	}
 
@@ -97,7 +98,7 @@ static int wasm_try_mmap_hint(uintptr_t requested, size_t rounded,
  * and, crucially, shares the same brk-backed malloc arena instead of creating
  * a second allocator that could overlap it.
  */
-static long wasm_mmap_direct(uintptr_t requested, size_t rounded)
+static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 {
 	struct wasm_mapping *mapping;
 	struct wasm_allocation *allocation;
@@ -112,7 +113,8 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded)
 	mapping = __libc_malloc(sizeof(*mapping));
 	if (!mapping)
 		return errno ? -errno : -ENOMEM;
-	hint_status = wasm_try_mmap_hint(requested, rounded, mapping, &result);
+	hint_status = wasm_try_mmap_hint(requested, rounded, exact, mapping,
+					 &result);
 	if (hint_status > 0)
 		return result;
 	if (hint_status < 0) {
@@ -158,7 +160,7 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded)
 
 long __wasm_mmap(size_t rounded)
 {
-	return wasm_mmap_direct(0, rounded);
+	return wasm_mmap_direct(0, rounded, 0);
 }
 
 /*
@@ -166,17 +168,20 @@ long __wasm_mmap(size_t rounded)
  * The current allocator still implements only the direct anonymous subset
  * validated by Linux.  A non-fixed address is used when it selects a free
  * page range in backing already reserved by this allocator; otherwise it
- * remains advisory and allocation falls back to the normal path.  Keeping the
- * old export preserves execution of modules built against the first ABI.
+ * remains advisory and allocation falls back to the normal path.
+ * MAP_FIXED_NOREPLACE uses the same safe range but requires an exact match,
+ * returning EEXIST for a live mapping and ENOMEM for an unreserved range.
+ * Keeping the old export preserves execution of modules built against the
+ * first ABI.
  */
 long __wasm_mmap_v2(uintptr_t address, size_t rounded, int prot, int flags,
 		    int fd, uintptr_t pgoff)
 {
 	(void)prot;
-	(void)flags;
 	(void)fd;
 	(void)pgoff;
-	return wasm_mmap_direct(address, rounded);
+	return wasm_mmap_direct(address, rounded,
+				flags & MAP_FIXED_NOREPLACE);
 }
 
 long __wasm_munmap(uintptr_t begin, size_t rounded)
