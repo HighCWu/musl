@@ -18,12 +18,18 @@ weak_alias(dummy, __vm_wait);
 
 #ifdef __wasm__
 
+#ifndef WASM_MMAP_DEDUP_SEARCH
+#define WASM_MMAP_DEDUP_SEARCH 1
+#endif
+
 struct wasm_allocation {
 	struct wasm_allocation *next_free;
 	size_t references;
 	void *address;
 	size_t length;
+#if WASM_MMAP_DEDUP_SEARCH
 	int search_seen;
+#endif
 };
 
 struct wasm_mapping {
@@ -115,15 +121,19 @@ static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
 		return contained ? -EEXIST : -ENOMEM;
 	}
 	if (!allocation) {
+#if WASM_MMAP_DEDUP_SEARCH
 		/* Marks are local to this search and protected by mappings_lock.
 		 * Reset through live mappings so no extra allocation, generation
 		 * counter, or separate backing lifetime bookkeeping is needed. */
 		for (current = mappings; current; current = current->next)
 			current->allocation->search_seen = 0;
+#endif
 		for (current = mappings; current; current = current->next) {
+#if WASM_MMAP_DEDUP_SEARCH
 			if (current->allocation->search_seen)
 				continue;
 			current->allocation->search_seen = 1;
+#endif
 			address = wasm_find_free(current->allocation, rounded);
 			if (address) {
 				allocation = current->allocation;
@@ -204,7 +214,9 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	allocation->references = 1;
 	allocation->address = (void *)address;
 	allocation->length = capacity;
+#if WASM_MMAP_DEDUP_SEARCH
 	allocation->search_seen = 0;
+#endif
 	mapping->allocation = allocation;
 	mapping->address = (void *)address;
 	mapping->length = rounded;
