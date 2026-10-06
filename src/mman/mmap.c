@@ -166,7 +166,8 @@ static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
  * and, crucially, shares the same brk-backed malloc arena instead of creating
  * a second allocator that could overlap it.
  */
-static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
+static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact,
+		int (*initialize)(void *, size_t, void *), void *argument)
 {
 	struct wasm_mapping *mapping;
 	struct wasm_allocation *allocation;
@@ -181,8 +182,10 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	mapping = __libc_malloc(sizeof(*mapping));
 	if (!mapping)
 		return errno ? -errno : -ENOMEM;
-	hint_status = wasm_try_mmap_existing(requested, rounded, exact, mapping,
-					     &result);
+	/* An initializer must never receive an already-published mapping. Fresh
+	 * backing stays private to this call until initialization has succeeded. */
+	hint_status = initialize ? 0 : wasm_try_mmap_existing(requested, rounded,
+						     exact, mapping, &result);
 	if (hint_status > 0)
 		return result;
 	if (hint_status < 0) {
@@ -221,6 +224,14 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	mapping->address = (void *)address;
 	mapping->length = rounded;
 	memset(mapping->address, 0, rounded);
+	if (initialize) {
+		int error = initialize(mapping->address, rounded, argument);
+		if (error) {
+			__libc_free(mapping);
+			__libc_free(allocation);
+			return error < 0 && error >= -4095 ? error : -EIO;
+		}
+	}
 
 	lock_error = pthread_mutex_lock(&mappings_lock);
 	if (lock_error) {
@@ -237,7 +248,19 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 
 long __wasm_mmap(size_t rounded)
 {
-	return wasm_mmap_direct(0, rounded, 0);
+	return wasm_mmap_direct(0, rounded, 0, 0, 0);
+}
+
+/* Internal bring-up primitive, not a Linux UAPI or a stable Wasm export.
+ * The synchronous initializer may copy into fresh backing but must not retain
+ * its pointer or perform asynchronous I/O. Publication follows only on 0.
+ * File admission, staging ownership and cancellation belong to the caller. */
+long __wasm_mmap_initialized(size_t rounded,
+		int (*initialize)(void *, size_t, void *), void *argument)
+{
+	if (!initialize)
+		return -EINVAL;
+	return wasm_mmap_direct(0, rounded, 0, initialize, argument);
 }
 
 /*
@@ -258,7 +281,7 @@ long __wasm_mmap_v2(uintptr_t address, size_t rounded, int prot, int flags,
 	(void)fd;
 	(void)pgoff;
 	return wasm_mmap_direct(address, rounded,
-				flags & MAP_FIXED_NOREPLACE);
+				flags & MAP_FIXED_NOREPLACE, 0, 0);
 }
 
 long __wasm_munmap(uintptr_t begin, size_t rounded)
