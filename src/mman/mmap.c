@@ -22,13 +22,31 @@ weak_alias(dummy, __vm_wait);
 #define WASM_MMAP_DEDUP_SEARCH 1
 #endif
 
+/* Experimental: retain reset-based deduplication as the default. */
+#ifndef WASM_MMAP_SEARCH_GENERATIONS
+#define WASM_MMAP_SEARCH_GENERATIONS 0
+#endif
+
+#if WASM_MMAP_DEDUP_SEARCH && WASM_MMAP_SEARCH_GENERATIONS
+#ifndef WASM_MMAP_SEARCH_EPOCH_MAX
+#define WASM_MMAP_SEARCH_EPOCH_MAX SIZE_MAX
+#endif
+_Static_assert(WASM_MMAP_SEARCH_EPOCH_MAX > 0 &&
+	WASM_MMAP_SEARCH_EPOCH_MAX <= SIZE_MAX, "invalid mmap search epoch limit");
+static size_t search_epoch;
+#endif
+
 struct wasm_allocation {
 	struct wasm_allocation *next_free;
 	size_t references;
 	void *address;
 	size_t length;
 #if WASM_MMAP_DEDUP_SEARCH
+#if WASM_MMAP_SEARCH_GENERATIONS
+	size_t search_seen;
+#else
 	int search_seen;
+#endif
 #endif
 };
 
@@ -122,17 +140,35 @@ static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
 	}
 	if (!allocation) {
 #if WASM_MMAP_DEDUP_SEARCH
+#if WASM_MMAP_SEARCH_GENERATIONS
+		/* The mutex protects both the epoch and live backing marks.
+		 * Before reuse of an epoch, clear every reachable backing. */
+		if (search_epoch == WASM_MMAP_SEARCH_EPOCH_MAX) {
+			for (current = mappings; current; current = current->next)
+				current->allocation->search_seen = 0;
+			search_epoch = 1;
+		} else {
+			search_epoch++;
+		}
+#else
 		/* Marks are local to this search and protected by mappings_lock.
 		 * Reset through live mappings so no extra allocation, generation
 		 * counter, or separate backing lifetime bookkeeping is needed. */
 		for (current = mappings; current; current = current->next)
 			current->allocation->search_seen = 0;
 #endif
+#endif
 		for (current = mappings; current; current = current->next) {
 #if WASM_MMAP_DEDUP_SEARCH
+#if WASM_MMAP_SEARCH_GENERATIONS
+			if (current->allocation->search_seen == search_epoch)
+				continue;
+			current->allocation->search_seen = search_epoch;
+#else
 			if (current->allocation->search_seen)
 				continue;
 			current->allocation->search_seen = 1;
+#endif
 #endif
 			address = wasm_find_free(current->allocation, rounded);
 			if (address) {
