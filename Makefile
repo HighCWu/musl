@@ -101,7 +101,7 @@ obj/include/bits/alltypes.h: $(srcdir)/arch/$(ARCH)/bits/alltypes.h.in $(srcdir)
 
 obj/include/bits/syscall.h: $(srcdir)/arch/$(ARCH)/bits/syscall.h.in
 	cp $< $@
-	sed -n -e s/__NR_/SYS_/p < $< >> $@
+	sed -n -e s/__NR_/SYS_/p -e '/^#\(if\|elif\|else\|endif\)/p' < $< >> $@
 
 obj/src/internal/version.h: $(wildcard $(srcdir)/VERSION $(srcdir)/.git)
 	printf '#define VERSION "%s"\n' "$$(cd $(srcdir); sh tools/version.sh)" > $@

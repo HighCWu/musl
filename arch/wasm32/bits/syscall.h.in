@@ -15,7 +15,9 @@
 #define __NR_adjtimex 171
 #define __NR_arch_specific_syscall 244
 #define __NR_mmap 222
+#if __SIZEOF_LONG__ == 4
 #define __NR_mmap2 222
+#endif
 #define __NR_munmap 215
 #define __NR_bind 200
 #define __NR_bpf 280
@@ -138,7 +140,11 @@
 #define __NR_listen 201
 #define __NR_listxattr 11
 #define __NR_llistxattr 12
+#if __SIZEOF_LONG__ == 4
 #define __NR__llseek __NR3264_lseek
+#else
+#define __NR_lseek __NR3264_lseek
+#endif
 #define __NR_lookup_dcookie 18
 #define __NR_lremovexattr 15
 #define __NR_lsetxattr 6

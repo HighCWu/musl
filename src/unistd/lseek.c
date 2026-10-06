@@ -5,10 +5,9 @@ off_t __lseek(int fd, off_t offset, int whence)
 {
 #ifdef SYS__llseek
 	off_t result;
-	return __syscall_ret(__syscall(SYS__llseek, fd, offset>>32, offset,
-		&result, whence)) ? -1 : result;
+	return syscall(SYS__llseek, fd, offset>>32, offset, &result, whence) ? -1 : result;
 #else
-	return __syscall_ret(__syscall(SYS_lseek, fd, offset, whence));
+	return syscall(SYS_lseek, fd, offset, whence);
 #endif
 }
 
