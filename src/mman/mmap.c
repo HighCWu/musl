@@ -23,6 +23,7 @@ struct wasm_allocation {
 	size_t references;
 	void *address;
 	size_t length;
+	int search_seen;
 };
 
 struct wasm_mapping {
@@ -114,7 +115,15 @@ static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
 		return contained ? -EEXIST : -ENOMEM;
 	}
 	if (!allocation) {
+		/* Marks are local to this search and protected by mappings_lock.
+		 * Reset through live mappings so no extra allocation, generation
+		 * counter, or separate backing lifetime bookkeeping is needed. */
+		for (current = mappings; current; current = current->next)
+			current->allocation->search_seen = 0;
 		for (current = mappings; current; current = current->next) {
+			if (current->allocation->search_seen)
+				continue;
+			current->allocation->search_seen = 1;
 			address = wasm_find_free(current->allocation, rounded);
 			if (address) {
 				allocation = current->allocation;
@@ -195,6 +204,7 @@ static long wasm_mmap_direct(uintptr_t requested, size_t rounded, int exact)
 	allocation->references = 1;
 	allocation->address = (void *)address;
 	allocation->length = capacity;
+	allocation->search_seen = 0;
 	mapping->allocation = allocation;
 	mapping->address = (void *)address;
 	mapping->length = rounded;
