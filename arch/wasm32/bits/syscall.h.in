@@ -75,8 +75,13 @@
 #define __NR_fsmount 432
 #define __NR_fsopen 430
 #define __NR_fspick 433
+#if __SIZEOF_LONG__ == 4
 #define __NR_fstat64 __NR3264_fstat
 #define __NR_fstatat64 __NR3264_fstatat
+#else
+#define __NR_fstat __NR3264_fstat
+#define __NR_newfstatat __NR3264_fstatat
+#endif
 #define __NR_fstatfs64 __NR3264_fstatfs
 #define __NR_fsync 82
 #define __NR_ftruncate64 __NR3264_ftruncate
