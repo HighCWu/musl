@@ -77,7 +77,13 @@
 #define __NR_fstat __NR3264_fstat
 #define __NR_newfstatat __NR3264_fstatat
 #endif
+/* asm-generic selects a two-argument native statfs ABI on LP64, not
+ * the ILP32 statfs64 ABI with an extra structure-size argument. */
+#if __SIZEOF_LONG__ == 4
 #define __NR_fstatfs64 __NR3264_fstatfs
+#else
+#define __NR_fstatfs __NR3264_fstatfs
+#endif
 #define __NR_fsync 82
 #define __NR_ftruncate64 __NR3264_ftruncate
 #define __NR_futex 98
@@ -288,7 +294,11 @@
 #define __NR_socket 198
 #define __NR_socketpair 199
 #define __NR_splice 76
+#if __SIZEOF_LONG__ == 4
 #define __NR_statfs64 __NR3264_statfs
+#else
+#define __NR_statfs __NR3264_statfs
+#endif
 #define __NR_statx 291
 #define __NR_swapoff 225
 #define __NR_swapon 224
