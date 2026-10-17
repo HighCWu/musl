@@ -116,10 +116,10 @@ extern "C" {
 
 void *mmap (void *, size_t, int, int, int, off_t);
 int munmap (void *, size_t);
+int msync (void *, size_t, int);
 
 #ifndef __wasm__
 int mprotect (void *, size_t, int);
-int msync (void *, size_t, int);
 
 int posix_madvise (void *, size_t, int);
 
