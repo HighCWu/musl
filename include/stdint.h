@@ -102,7 +102,7 @@ typedef uint64_t uint_least64_t;
 #define UINT16_C(c) c
 #define UINT32_C(c) c ## U
 
-#if UINTPTR_MAX == UINT64_MAX
+#if UINTPTR_MAX == UINT64_MAX && !defined(__wasm__)
 #define INT64_C(c) c ## L
 #define UINT64_C(c) c ## UL
 #define INTMAX_C(c)  c ## L
