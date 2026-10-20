@@ -118,6 +118,10 @@ void *mmap (void *, size_t, int, int, int, off_t);
 int munmap (void *, size_t);
 int msync (void *, size_t, int);
 
+#ifdef _GNU_SOURCE
+int memfd_create (const char *, unsigned);
+#endif
+
 #ifndef __wasm__
 int mprotect (void *, size_t, int);
 
@@ -131,7 +135,6 @@ int munlockall (void);
 #ifdef _GNU_SOURCE
 void *mremap (void *, size_t, size_t, int, ...);
 int remap_file_pages (void *, size_t, int, size_t, int);
-int memfd_create (const char *, unsigned);
 int mlock2 (const void *, size_t, unsigned);
 #endif
 
