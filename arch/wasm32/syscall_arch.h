@@ -1,3 +1,6 @@
+/* asm-generic native IPC entries already select the IPC64 structure layout. */
+#define IPC_64 0
+
 #if __SIZEOF_LONG__ == 4
 #define __SYSCALL_LL_E(x) \
 ((union { long long ll; long l[2]; }){ .ll = x }).l[0], \
