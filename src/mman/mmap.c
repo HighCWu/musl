@@ -376,6 +376,44 @@ long __wasm_munmap(uintptr_t begin, size_t rounded)
 	}
 	return 0;
 }
+/* All admitted direct mappings are private and none can be mlocked. Like
+ * Linux msync, a valid private range has no shared-file writeback to perform.
+ * Still validate every byte of the rounded interval, including split records;
+ * readable allocator backing alone is not proof of a live mapping. */
+long __wasm_msync(uintptr_t begin, size_t rounded, int flags)
+{
+	struct wasm_mapping *mapping;
+	uintptr_t cursor = begin, end, next;
+	int error;
+
+	if ((begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
+	    (flags & ~(MS_ASYNC | MS_SYNC | MS_INVALIDATE)) ||
+	    ((flags & MS_ASYNC) && (flags & MS_SYNC)))
+		return -EINVAL;
+	if (begin > UINTPTR_MAX - rounded)
+		return -ENOMEM;
+	if (!rounded)
+		return 0;
+	end = begin + rounded;
+	error = pthread_mutex_lock(&mappings_lock);
+	if (error)
+		return error > 0 ? -error : -EINVAL;
+	while (cursor < end) {
+		next = cursor;
+		for (mapping = mappings; mapping; mapping = mapping->next) {
+			uintptr_t start = (uintptr_t)mapping->address;
+			if (start <= cursor && cursor - start < mapping->length) {
+				next = start + mapping->length;
+				break;
+			}
+		}
+		if (next == cursor) { error = -ENOMEM; break; }
+		cursor = next < end ? next : end;
+	}
+	(void)pthread_mutex_unlock(&mappings_lock);
+	return error;
+}
+
 /* Internal direct-memory resize; no public libc entry or execution export is
  * enabled merely by defining this helper. Preparation may allocate, so keep
  * it outside mappings_lock and revalidate the live source before publication.
