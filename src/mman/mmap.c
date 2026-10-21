@@ -1,3 +1,6 @@
+#ifdef __wasm__
+#define _GNU_SOURCE
+#endif
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
