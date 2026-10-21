@@ -120,6 +120,7 @@ int msync (void *, size_t, int);
 
 #ifdef _GNU_SOURCE
 int memfd_create (const char *, unsigned);
+void *mremap (void *, size_t, size_t, int, ...);
 #endif
 
 #ifndef __wasm__
@@ -133,7 +134,6 @@ int mlockall (int);
 int munlockall (void);
 
 #ifdef _GNU_SOURCE
-void *mremap (void *, size_t, size_t, int, ...);
 int remap_file_pages (void *, size_t, int, size_t, int);
 int mlock2 (const void *, size_t, unsigned);
 #endif

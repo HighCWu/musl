@@ -19,6 +19,7 @@
 #define __NR_mmap2 222
 #endif
 #define __NR_munmap 215
+#define __NR_mremap 216
 #define __NR_bind 200
 #define __NR_bpf 280
 #define __NR_capget 90

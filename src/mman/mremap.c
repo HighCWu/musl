@@ -9,7 +9,6 @@
 static void dummy(void) { }
 weak_alias(dummy, __vm_wait);
 
-#ifndef __wasm__
 void *__mremap(void *old_addr, size_t old_len, size_t new_len, int flags, ...)
 {
 	va_list ap;
@@ -27,8 +26,13 @@ void *__mremap(void *old_addr, size_t old_len, size_t new_len, int flags, ...)
 		va_end(ap);
 	}
 
+#ifdef __wasm__
+	/* The Wasm variadic entry reads six native machine words. */
+	return (void *)syscall(SYS_mremap, (long)old_addr, (long)old_len,
+		(long)new_len, (long)flags, (long)new_addr, 0L);
+#else
 	return (void *)syscall(SYS_mremap, old_addr, old_len, new_len, flags, new_addr);
+#endif
 }
 
 weak_alias(__mremap, mremap);
-#endif
