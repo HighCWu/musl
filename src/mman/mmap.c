@@ -297,24 +297,34 @@ long __wasm_mmap_v2(uintptr_t address, size_t rounded, int prot, int flags,
 				flags & MAP_FIXED_NOREPLACE, 0, 0);
 }
 
-/* MAP_FIXED may replace only memory already reserved by this allocator.
- * Prepare metadata before locking and keep a new reference while removing
- * old records, including the last old reference to the backing allocation. */
-long __wasm_mmap_fixed(uintptr_t begin, size_t rounded)
+/* Fixed placement replaces only memory already reserved by this allocator.
+ * An optional disjoint source must fit one live record. Prepare all metadata
+ * before locking; then validate, copy, replace and remove the source without
+ * a fallible step. A new destination reference protects even shared backing. */
+static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
+		uintptr_t source, size_t old_length)
 {
-	struct wasm_mapping *replacement, *spare, *mapping, **cursor, *removed = 0;
-	struct wasm_allocation *allocation = 0;
+	struct wasm_mapping *replacement, *spare, *source_spare, *mapping, **cursor, *removed = 0;
+	struct wasm_allocation *allocation = 0, *source_allocation = 0, *released = 0;
 	uintptr_t end;
 	long result;
-	int error;
+	int error, initialized = 0;
 
 	if (!begin || !rounded || (begin & (PAGESIZE - 1)) ||
 	    (rounded & (PAGESIZE - 1)) || begin > UINTPTR_MAX - rounded)
 		return -EINVAL;
 	end = begin + rounded;
+	if (old_length && ((source & (PAGESIZE - 1)) ||
+	    (old_length & (PAGESIZE - 1)) || source > UINTPTR_MAX - old_length ||
+	    (begin < source + old_length && source < end)))
+		return -EINVAL;
 	replacement = __libc_malloc(sizeof(*replacement));
 	spare = __libc_malloc(sizeof(*spare));
-	if (!replacement || !spare) { result = -ENOMEM; goto fixed_out; }
+	source_spare = old_length ? __libc_malloc(sizeof(*source_spare)) : 0;
+	if (!replacement || !spare || (old_length && !source_spare)) {
+		result = -ENOMEM;
+		goto fixed_out;
+	}
 	error = pthread_mutex_lock(&mappings_lock);
 	if (error) { result = error > 0 ? -error : -EINVAL; goto fixed_out; }
 	for (mapping = mappings; mapping; mapping = mapping->next) {
@@ -327,61 +337,110 @@ long __wasm_mmap_fixed(uintptr_t begin, size_t rounded)
 		}
 	}
 	if (!allocation) {
-		(void)pthread_mutex_unlock(&mappings_lock);
 		result = -ENOMEM;
-		goto fixed_out;
+		goto fixed_unlock;
 	}
+	if (old_length) {
+		for (mapping = mappings; mapping; mapping = mapping->next) {
+			uintptr_t start = (uintptr_t)mapping->address;
+			if (source >= start && old_length <= mapping->length &&
+			    source - start <= mapping->length - old_length) {
+				source_allocation = mapping->allocation;
+				initialized = mapping->initialized;
+				break;
+			}
+		}
+		if (!source_allocation) { result = -EFAULT; goto fixed_unlock; }
+		if (initialized && rounded > old_length) {
+			result = -EOPNOTSUPP;
+			goto fixed_unlock;
+		}
+	}
+	/* Nothing below can fail. Hold the destination before removing any old
+	 * references; source and destination may share the same allocation. */
 	allocation->references++;
-	for (cursor = &mappings; (mapping = *cursor); ) {
-		uintptr_t start = (uintptr_t)mapping->address;
-		uintptr_t stop = start + mapping->length;
-		if (mapping->allocation != allocation || end <= start || begin >= stop) {
-			cursor = &mapping->next;
-			continue;
-		}
-		if (begin <= start && end >= stop) {
-			*cursor = mapping->next;
-			mapping->next = removed;
-			removed = mapping;
-			allocation->references--;
-			continue;
-		}
-		if (begin <= start) {
-			mapping->address = (void *)end;
-			mapping->length = stop - end;
-		} else if (end >= stop) {
-			mapping->length = begin - start;
-		} else {
-			*spare = *mapping;
-			spare->address = (void *)end;
-			spare->length = stop - end;
-			mapping->next = spare;
-			mapping->length = begin - start;
-			allocation->references++;
-			spare = 0;
-			break;
-		}
-		cursor = &mapping->next;
-	}
 	memset((void *)begin, 0, rounded);
+	if (old_length)
+		memcpy((void *)begin, (void *)source,
+			old_length < rounded ? old_length : rounded);
+	for (int pass = 0; pass < (old_length ? 2 : 1); pass++) {
+		uintptr_t first = pass ? source : begin;
+		uintptr_t last = pass ? source + old_length : end;
+		struct wasm_allocation *owner = pass ? source_allocation : allocation;
+		struct wasm_mapping **split = pass ? &source_spare : &spare;
+		for (cursor = &mappings; (mapping = *cursor); ) {
+			uintptr_t start = (uintptr_t)mapping->address;
+			uintptr_t stop = start + mapping->length;
+			if (mapping->allocation != owner || last <= start || first >= stop) {
+				cursor = &mapping->next;
+				continue;
+			}
+			if (first <= start && last >= stop) {
+				*cursor = mapping->next;
+				mapping->next = removed;
+				removed = mapping;
+				if (!--owner->references) {
+					owner->next_free = released;
+					released = owner;
+				}
+				continue;
+			}
+			if (first <= start) {
+				mapping->address = (void *)last;
+				mapping->length = stop - last;
+			} else if (last >= stop) {
+				mapping->length = first - start;
+			} else {
+				**split = *mapping;
+				(*split)->address = (void *)last;
+				(*split)->length = stop - last;
+				mapping->next = *split;
+				mapping->length = first - start;
+				owner->references++;
+				*split = 0;
+				break;
+			}
+			cursor = &mapping->next;
+		}
+	}
 	replacement->allocation = allocation;
 	replacement->address = (void *)begin;
 	replacement->length = rounded;
-	replacement->initialized = 0;
+	replacement->initialized = initialized;
 	replacement->next = mappings;
 	mappings = replacement;
 	replacement = 0;
-	(void)pthread_mutex_unlock(&mappings_lock);
 	result = (long)begin;
+fixed_unlock:
+	(void)pthread_mutex_unlock(&mappings_lock);
 fixed_out:
 	__libc_free(replacement);
 	__libc_free(spare);
+	__libc_free(source_spare);
 	while (removed) {
 		mapping = removed;
 		removed = mapping->next;
 		__libc_free(mapping);
 	}
+	while (released) {
+		allocation = released;
+		released = allocation->next_free;
+		__libc_free(allocation);
+	}
 	return result;
+}
+
+long __wasm_mmap_fixed(uintptr_t begin, size_t rounded)
+{
+	return wasm_fixed_mapping(begin, rounded, 0, 0);
+}
+
+long __wasm_mremap_fixed(uintptr_t source, size_t old_length,
+		size_t new_length, uintptr_t destination)
+{
+	if (!old_length)
+		return -EINVAL;
+	return wasm_fixed_mapping(destination, new_length, source, old_length);
 }
 
 long __wasm_munmap(uintptr_t begin, size_t rounded)
