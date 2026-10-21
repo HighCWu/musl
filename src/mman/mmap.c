@@ -384,8 +384,9 @@ long __wasm_mremap(uintptr_t begin, size_t old_length, size_t new_length,
 		unsigned long flags)
 {
 	struct wasm_mapping **cursor, *mapping, *current, *prepared = 0, *removed = 0;
+	struct wasm_mapping *spare = 0;
 	struct wasm_allocation *released = 0;
-	uintptr_t end, allocation_begin;
+	uintptr_t end, allocation_begin, mapping_begin, mapping_end, old_end;
 	long result;
 	int lock_error, available;
 
@@ -398,22 +399,37 @@ long __wasm_mremap(uintptr_t begin, size_t old_length, size_t new_length,
 		return -EOPNOTSUPP;
 	if (new_length > SIZE_MAX - PAGESIZE - sizeof(struct wasm_allocation))
 		return -ENOMEM;
+	old_end = begin + old_length;
 
 retry:
 	lock_error = pthread_mutex_lock(&mappings_lock);
 	if (lock_error) { result = -lock_error; goto out; }
 	for (cursor = &mappings; (mapping = *cursor); cursor = &mapping->next)
-		if ((uintptr_t)mapping->address == begin)
+		if ((uintptr_t)mapping->address <= begin &&
+		    begin - (uintptr_t)mapping->address < mapping->length)
 			break;
 	result = -EFAULT;
 	if (!mapping)
 		goto unlock;
-	if (mapping->length != old_length) {
-		result = old_length < mapping->length ? -EOPNOTSUPP : -EFAULT;
+	mapping_begin = (uintptr_t)mapping->address;
+	mapping_end = mapping_begin + mapping->length;
+	if (old_end > mapping_end)
 		goto unlock;
-	}
 	if (new_length <= old_length) {
-		mapping->length = new_length;
+		if (new_length == old_length) { result = (long)begin; goto unlock; }
+		/* Shrinking a subrange removes only its tail, not the unrequested
+		 * suffix of the containing record. Prepare split metadata first. */
+		if (old_end < mapping_end) {
+			if (!spare)
+				goto prepare_split;
+			*spare = *mapping;
+			spare->address = (void *)old_end;
+			spare->length = mapping_end - old_end;
+			mapping->next = spare;
+			mapping->allocation->references++;
+			spare = 0;
+		}
+		mapping->length = begin + new_length - mapping_begin;
 		result = (long)begin;
 		goto unlock;
 	}
@@ -421,7 +437,8 @@ retry:
 	if (mapping->initialized) { result = -EOPNOTSUPP; goto unlock; }
 	allocation_begin = (uintptr_t)mapping->allocation->address;
 	available = new_length <= mapping->allocation->length &&
-		begin - allocation_begin <= mapping->allocation->length - new_length;
+		begin - allocation_begin <= mapping->allocation->length - new_length &&
+		old_end == mapping_end;
 	if (available) {
 		end = begin + new_length;
 		for (current = mappings; current; current = current->next)
@@ -434,7 +451,7 @@ retry:
 	}
 	if (available) {
 		memset((void *)(begin + old_length), 0, new_length - old_length);
-		mapping->length = new_length;
+		mapping->length = end - mapping_begin;
 		result = (long)begin;
 		goto unlock;
 	}
@@ -444,27 +461,50 @@ retry:
 	if (!prepared) {
 		(void)pthread_mutex_unlock(&mappings_lock);
 		prepared = __libc_malloc(sizeof(*prepared));
-		if (!prepared)
-			return -ENOMEM;
+		if (!prepared) { result = -ENOMEM; goto out; }
 		result = wasm_prepare_mapping(prepared, new_length, 0, 0);
-		if (result) { __libc_free(prepared); return result; }
+		if (result) { __libc_free(prepared); prepared = 0; goto out; }
 		goto retry;
 	}
-	memcpy(prepared->address, mapping->address, old_length);
-	*cursor = mapping->next;
-	removed = mapping;
-	if (!--mapping->allocation->references)
-		released = mapping->allocation;
+	if (begin > mapping_begin && old_end < mapping_end && !spare)
+		goto prepare_split;
+	memcpy(prepared->address, (void *)begin, old_length);
+	if (begin == mapping_begin && old_end == mapping_end) {
+		*cursor = mapping->next;
+		removed = mapping;
+		if (!--mapping->allocation->references)
+			released = mapping->allocation;
+	} else if (begin == mapping_begin) {
+		mapping->address = (void *)old_end;
+		mapping->length = mapping_end - old_end;
+	} else {
+		if (old_end < mapping_end) {
+			*spare = *mapping;
+			spare->address = (void *)old_end;
+			spare->length = mapping_end - old_end;
+			mapping->next = spare;
+			mapping->allocation->references++;
+			spare = 0;
+		}
+		mapping->length = begin - mapping_begin;
+	}
 	prepared->next = mappings;
 	mappings = prepared;
 	result = (long)prepared->address;
 	prepared = 0;
+	goto unlock;
+prepare_split:
+	(void)pthread_mutex_unlock(&mappings_lock);
+	spare = __libc_malloc(sizeof(*spare));
+	if (!spare) { result = -ENOMEM; goto out; }
+	goto retry;
 unlock:
 	(void)pthread_mutex_unlock(&mappings_lock);
 out:
 	if (prepared) { __libc_free(prepared->allocation); __libc_free(prepared); }
 	__libc_free(removed);
 	__libc_free(released);
+	__libc_free(spare);
 	return result;
 }
 
