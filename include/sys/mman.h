@@ -117,6 +117,11 @@ extern "C" {
 void *mmap (void *, size_t, int, int, int, off_t);
 int munmap (void *, size_t);
 int msync (void *, size_t, int);
+int posix_madvise (void *, size_t, int);
+
+#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+int madvise (void *, size_t, int);
+#endif
 
 #ifdef _GNU_SOURCE
 int memfd_create (const char *, unsigned);
@@ -125,8 +130,6 @@ void *mremap (void *, size_t, size_t, int, ...);
 
 #ifndef __wasm__
 int mprotect (void *, size_t, int);
-
-int posix_madvise (void *, size_t, int);
 
 int mlock (const void *, size_t);
 int munlock (const void *, size_t);
@@ -139,7 +142,6 @@ int mlock2 (const void *, size_t, unsigned);
 #endif
 
 #if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
-int madvise (void *, size_t, int);
 int mincore (void *, size_t, unsigned char *);
 #endif
 

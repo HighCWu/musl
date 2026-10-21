@@ -414,6 +414,49 @@ long __wasm_msync(uintptr_t begin, size_t rounded, int flags)
 	return error;
 }
 
+/* Resident direct mappings need no readahead. DONTNEED must instead erase
+ * anonymous contents without releasing the address reservation. File-copy
+ * provenance cannot reconstruct the original bytes, so do not discard it.
+ * Validate before mutation while holding the same lock as munmap/mremap. */
+long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
+{
+	struct wasm_mapping *mapping;
+	uintptr_t cursor = begin, end, next;
+	int error;
+
+	if ((begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
+	    advice < MADV_NORMAL || advice > MADV_DONTNEED ||
+	    begin > UINTPTR_MAX - rounded)
+		return -EINVAL;
+	if (!rounded)
+		return 0;
+	end = begin + rounded;
+	error = pthread_mutex_lock(&mappings_lock);
+	if (error)
+		return error > 0 ? -error : -EINVAL;
+	while (cursor < end) {
+		next = cursor;
+		for (mapping = mappings; mapping; mapping = mapping->next) {
+			uintptr_t start = (uintptr_t)mapping->address;
+			if (start <= cursor && cursor - start < mapping->length) {
+				if (advice == MADV_DONTNEED && mapping->initialized) {
+					error = -EOPNOTSUPP;
+					goto out_advice;
+				}
+				next = start + mapping->length;
+				break;
+			}
+		}
+		if (next == cursor) { error = -ENOMEM; goto out_advice; }
+		cursor = next < end ? next : end;
+	}
+	if (advice == MADV_DONTNEED)
+		memset((void *)begin, 0, rounded);
+out_advice:
+	(void)pthread_mutex_unlock(&mappings_lock);
+	return error;
+}
+
 /* Internal direct-memory resize; no public libc entry or execution export is
  * enabled merely by defining this helper. Preparation may allocate, so keep
  * it outside mappings_lock and revalidate the live source before publication.
