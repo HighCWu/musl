@@ -8,6 +8,8 @@ int __wasm_copy_siginfo(siginfo_t *);
 
 __attribute__((import_module("linux_signal_v1"), import_name("frame")))
 int __wasm_copy_signal_frame(stack_t *, sigset_t *);
+__attribute__((import_module("linux_signal_v1"), import_name("finish")))
+int __wasm_finish_signal_frame(const stack_t *, const sigset_t *);
 
 hidden void __restore(void)
 {
@@ -33,4 +35,6 @@ hidden void __restore_rt(uintptr_t fn, int sig)
 	if (result && result != -95) return;
 
 	handler(sig, &info, &context);
+	/* Snapshot while context is alive. SjLj skips this just like sigreturn. */
+	if (!result) __wasm_finish_signal_frame(&context.uc_stack, &context.uc_sigmask);
 }
