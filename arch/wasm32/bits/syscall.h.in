@@ -306,7 +306,11 @@
 #define __NR_swapon 224
 #define __NR_symlinkat 36
 #define __NR_sync 81
+#if __SIZEOF_LONG__ == 4
 #define __NR_sync_file_range2 84
+#else
+#define __NR_sync_file_range 84
+#endif
 #define __NR_syncfs 267
 #define __NR_syscalls 451
 #define __NR_sysinfo 179
