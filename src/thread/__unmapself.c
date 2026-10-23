@@ -24,9 +24,31 @@ void __unmapself(void *base, size_t size)
 	CRTJMP(do_unmap, stack);
 }
 #else
+#if __SIZEOF_POINTER__ == 8
+__asm__(".globaltype __stack_pointer, i64\n");
+#else
+__asm__(".globaltype __stack_pointer, i32\n");
+#endif
+/* __pthread_exit holds the thread-list lock until the kernel clears its
+ * clear_child_tid word. Thus only one exiting thread can use this stack,
+ * including while free publishes the old stack/TLS for immediate reuse. */
+static unsigned char exit_stack[DEFAULT_STACK_SIZE] __attribute__((aligned(16)));
+static void *exit_base;
+
+static __attribute__((noinline, noreturn)) void free_and_exit(void)
+{
+	__libc_free(exit_base);
+	/* Never return through the old caller, even if a tracer skips exit. */
+	for (;;) __syscall(SYS_exit, 0);
+}
+
 void __unmapself(void *base, size_t size)
 {
-	__libc_free(base);
-	__syscall(SYS_exit, 0);
+	(void)size;
+	exit_base = base;
+	void *top = exit_stack + sizeof exit_stack;
+	__asm__ volatile("local.get %0\n"
+			 "global.set __stack_pointer" :: "r"(top) : "memory");
+	free_and_exit();
 }
 #endif

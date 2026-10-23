@@ -148,7 +148,13 @@ _Noreturn void __pthread_exit(void *result)
 	 * has been called, via the exit futex address pointing at the lock.
 	 * This needs to happen after any possible calls to LOCK() that might
 	 * skip locking if process appears single-threaded. */
+#ifdef __wasm__
+	/* Detached exit still uses malloc after leaving the thread list. Keep
+	 * its locks enabled; the remaining user thread may allocate concurrently. */
+	--libc.threads_minus_1;
+#else
 	if (!--libc.threads_minus_1) libc.need_locks = -1;
+#endif
 	self->next->prev = self->prev;
 	self->prev->next = self->next;
 	self->prev = self->next = self;
