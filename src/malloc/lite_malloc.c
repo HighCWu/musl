@@ -74,7 +74,12 @@ static void *__simple_malloc(size_t n)
 			brk_ = end += req;
 		} else {
 			#ifdef __wasm__
-			a_crash();
+			/* Wasm mmap uses the same allocator, so it cannot provide
+			 * the native fallback below. Growth failure is nevertheless
+			 * ordinary exhaustion, not a reason to trap the process. */
+			UNLOCK(lock);
+			errno = ENOMEM;
+			return 0;
 			#else
 			int new_area = 0;
 			req = n + PAGE_SIZE-1 & -PAGE_SIZE;
