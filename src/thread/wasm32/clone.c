@@ -43,6 +43,11 @@ struct clone_entry_arg {
 
 __attribute__((__noreturn__, __noinline__))
 static void clone_entry_inner(int (*func)(void *), void *arg) {
+  /* Wasm prepares the C stack and TLS in clone_entry(), not kernel CPU
+   * registers. Cross the standard syscall return boundary only after that
+   * preparation, so pending signals and the ptrace newborn stop run before
+   * the application's first callback operation. */
+  __syscall(SYS_gettid);
   int status = func(arg);
   __syscall(SYS_exit, status);
   __builtin_unreachable();
