@@ -32,6 +32,10 @@ struct pthread {
 #endif
 
 	/* Part 2 -- implementation details, non-ABI. */
+#ifdef __wasm__
+	/* Synchronous signal callbacks have no interrupted native PC. */
+	void *volatile wasm_cancelpoint, *volatile wasm_interrupted_cancelpoint;
+#endif
 	int tid;
 	int errno_val;
 	volatile int detach_state;

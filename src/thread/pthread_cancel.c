@@ -2,8 +2,15 @@
 #include <string.h>
 #include "pthread_impl.h"
 #include "syscall.h"
+#ifdef __wasm__
+#include <setjmp.h>
+#endif
 
 hidden long __cancel(), __syscall_cp_c();
+#ifdef __wasm__
+__attribute__((import_module("linux_signal_cancel_v1"), import_name("abi")))
+hidden int __wasm_signal_cancel_abi(void);
+#endif
 
 long __cancel()
 {
@@ -13,6 +20,28 @@ long __cancel()
 	self->canceldisable = PTHREAD_CANCEL_DISABLE;
 	return -ECANCELED;
 }
+
+#ifdef __wasm__
+/* Keep SjLj setup out of disabled cancellation (including malloc's locks).
+ * LLVM may allocate activation metadata for a setjmp-containing function. */
+static __attribute__((noinline)) long wasm_cancellable_syscall(pthread_t self,
+	syscall_arg_t nr, syscall_arg_t u, syscall_arg_t v, syscall_arg_t w,
+	syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
+{
+	void *previous = self->wasm_cancelpoint;
+	jmp_buf cancel_jump;
+	if (setjmp(cancel_jump)) {
+		self->wasm_cancelpoint = previous;
+		return __cancel();
+	}
+	/* Cancellation may have arrived during the SjLj runtime's setup. */
+	if (self->cancel) return __cancel();
+	self->wasm_cancelpoint = nr == SYS_close ? 0 : cancel_jump;
+	long result = __syscall(nr, u, v, w, x, y, z);
+	self->wasm_cancelpoint = previous;
+	return result;
+}
+#endif
 
 #ifndef __wasm__
 hidden long __syscall_cp_asm();
@@ -36,7 +65,11 @@ long __syscall_cp_c(syscall_arg_t nr,
 
 #ifdef __wasm__
 	if (self->cancel) return __cancel();
-	r = __syscall(nr, u, v, w, x, y, z);
+	/* The host must also bracket one-argument handlers. Older hosts reject
+	 * this private import rather than silently exposing an unsafe marker. */
+	if (__wasm_signal_cancel_abi() != 1) return -ENOSYS;
+	r = nr == SYS_close ? __syscall(nr, u, v, w, x, y, z) :
+		wasm_cancellable_syscall(self, nr, u, v, w, x, y, z);
 	if (nr!=SYS_close && self->cancel &&
 	    self->canceldisable != PTHREAD_CANCEL_DISABLE)
 		r = __cancel();
@@ -74,9 +107,13 @@ static void cancel_handler(int sig, siginfo_t *si, void *ctx)
 	}
 
 #ifdef __wasm__
-	/* WebAssembly cannot redirect the interrupted program counter. Async
-	 * cancellation was handled above; leave deferred cancellation pending
-	 * for the cancellation-point syscall wrapper. */
+	/* Return to the cancellation wrapper before SA_RESTART can restart a
+	 * blocked call. Masked cancellation (cond_wait) must return ECANCELED
+	 * there, not exit from this handler before reacquiring its mutex. */
+	if (self->wasm_interrupted_cancelpoint) {
+		pthread_sigmask(SIG_SETMASK, &uc->uc_sigmask, 0);
+		longjmp(self->wasm_interrupted_cancelpoint, 1);
+	}
 	return;
 #else
 	extern hidden const char __cp_begin[1], __cp_end[1], __cp_cancel[1];
