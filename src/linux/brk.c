@@ -7,27 +7,20 @@
 #include "pthread_impl.h"
 
 extern void __heap_end; // synthesised by linker
-static void *heap_limit;
-
 static void *current = &__heap_end;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int _brk(void *end) {
-	if (!heap_limit)
-		heap_limit = (void *)(__builtin_wasm_memory_size(0) * PAGESIZE);
+	uintptr_t address = (uintptr_t)end;
+	size_t pages, present;
 
-	if (end < current) goto fail;
-
-	if (end <= heap_limit) {
-		current = end;
-		return 0;
-	}
-
-	size_t bytes = (uintptr_t)end - (uintptr_t)heap_limit;
-	size_t pages = (bytes + PAGESIZE - 1) / PAGESIZE;
-
-	if (__builtin_wasm_memory_grow(0, pages) == SIZE_MAX) goto fail;
-	heap_limit = (void *)(__builtin_wasm_memory_size(0) * PAGESIZE);
+	if (address < (uintptr_t)current) goto fail;
+	/* Count pages rather than caching a byte-end pointer: 4 GiB is a
+	 * valid wasm32 capacity but cannot be represented by that pointer. */
+	pages = address / PAGESIZE + !!(address % PAGESIZE);
+	present = __builtin_wasm_memory_size(0);
+	if (pages > present &&
+	    __builtin_wasm_memory_grow(0, pages - present) == SIZE_MAX) goto fail;
 	current = end;
 
 	return 0;
@@ -46,7 +39,15 @@ int brk(void *end) {
 void *sbrk(intptr_t inc) {
 	if (pthread_mutex_lock(&mutex) != 0) a_crash();
 	void *old = current;
-	int ret = _brk(current + inc);
+	int ret;
+	/* This allocator has always been monotonic. Reject shrinking before
+	 * unsigned conversion, and reject wrap before constructing a pointer. */
+	if (inc < 0 || (uintptr_t)inc > UINTPTR_MAX - (uintptr_t)current) {
+		errno = ENOMEM;
+		ret = -1;
+	} else {
+		ret = _brk((void *)((uintptr_t)current + (uintptr_t)inc));
+	}
 	pthread_mutex_unlock(&mutex);
 	return ret == 0 ? old : (void *)-1;
 }
