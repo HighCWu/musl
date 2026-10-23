@@ -22,13 +22,7 @@ long ptrace(int req, ...)
 	va_end(ap);
 
 	if (req-1U < 3) data = &result;
-#ifdef __wasm__
-	/* The imported Wasm syscall has machine-word arguments. In particular,
-	 * wasm64 cannot recover promoted int arguments from a long va_list. */
-	ret = __syscall_ret(__syscall(SYS_ptrace, req, pid, addr, data, addr2));
-#else
 	ret = syscall(SYS_ptrace, req, pid, addr, data, addr2);
-#endif
 
 	if (ret < 0 || req-1U >= 3) return ret;
 	return result;
