@@ -35,12 +35,23 @@ int clone(int (*func)(void *), void *stack, int flags, void *arg, ...)
 		return __syscall_ret(-EINVAL);
 
 	va_start(ap, arg);
+#ifdef __wasm__
+	/* Optional arguments retain their parent_tid, tls, child_tid positions.
+	 * Read only the prefix required by the supported public clone flags. */
+	if (flags & (CLONE_PIDFD | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID))
+		ptid = va_arg(ap, pid_t *);
+	if (flags & CLONE_CHILD_SETTID) {
+		tls = va_arg(ap, void *);
+		ctid = va_arg(ap, pid_t *);
+	}
+#else
 	if (flags & (CLONE_PIDFD | CLONE_PARENT_SETTID))
 	 	ptid = va_arg(ap, pid_t *);
 	if (flags & CLONE_SETTLS)
 		tls = va_arg(ap, void *);
 	if (flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID))
 		ctid = va_arg(ap, pid_t *);
+#endif
 	va_end(ap);
 
 	if (flags & CLONE_VM) return __syscall_ret(
