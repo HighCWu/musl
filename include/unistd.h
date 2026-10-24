@@ -184,6 +184,20 @@ void endusershell(void);
 char *getusershell(void);
 int acct(const char *);
 long syscall(long, ...);
+#if defined(__wasm__) && __SIZEOF_LONG__ == 8
+/* Wasm varargs pack int at four-byte intervals, unlike Linux syscall words.
+ * Normalize direct calls without changing the existing linkable function.
+ * Keep wasm32 unchanged, including explicitly split 64-bit syscall arguments. */
+#define __WASM_SC7(n,a,b,c,d,e,f) syscall((long)(n),(long)(a),(long)(b),(long)(c),(long)(d),(long)(e),(long)(f))
+#define __WASM_SC6(n,a,b,c,d,e) __WASM_SC7(n,a,b,c,d,e,0)
+#define __WASM_SC5(n,a,b,c,d) __WASM_SC7(n,a,b,c,d,0,0)
+#define __WASM_SC4(n,a,b,c) __WASM_SC7(n,a,b,c,0,0,0)
+#define __WASM_SC3(n,a,b) __WASM_SC7(n,a,b,0,0,0,0)
+#define __WASM_SC2(n,a) __WASM_SC7(n,a,0,0,0,0,0)
+#define __WASM_SC1(n) __WASM_SC7(n,0,0,0,0,0,0)
+#define __WASM_SC_PICK(_1,_2,_3,_4,_5,_6,_7,impl,...) impl
+#define syscall(...) __WASM_SC_PICK(__VA_ARGS__,__WASM_SC7,__WASM_SC6,__WASM_SC5,__WASM_SC4,__WASM_SC3,__WASM_SC2,__WASM_SC1,unused)(__VA_ARGS__)
+#endif
 int execvpe(const char *, char *const [], char *const []);
 int issetugid(void);
 int getentropy(void *, size_t);
