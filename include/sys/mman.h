@@ -145,11 +145,11 @@ int mlock2 (const void *, size_t, unsigned);
 int mincore (void *, size_t, unsigned char *);
 #endif
 
+#endif
+
 #if defined(_LARGEFILE64_SOURCE)
 #define mmap64 mmap
 #define off64_t off_t
-#endif
-
 #endif
 
 int shm_open (const char *, int, mode_t);
