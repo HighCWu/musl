@@ -12,8 +12,9 @@ LIBCC =
 # Scoped to these objects so the rest of libc stays free of the Wasm
 # exception-handling feature; a program requires it when using SjLj or cancellation.
 #
-# wasm_longjmp.c, siglongjmp.c and the existing cancellation implementation
-# (which now contains a cancellation checkpoint) go through the pass.
+# wasm_longjmp.c, siglongjmp.c, cancellation and SIGEV_THREAD timer callbacks
+# go through the pass. Timer cleanup calls longjmp even on a normal callback
+# return, and start() must own the matching transformed setjmp activation.
 # setjmp.c and longjmp.c are excluded: the
 # setjmp/longjmp helpers are plain memory writes, and running the pass over the
 # real setjmp/longjmp definitions rejects the _setjmp/_longjmp weak aliases as
@@ -21,5 +22,6 @@ LIBCC =
 WASM_SJLJ_OBJS = \
 	obj/src/setjmp/wasm32/wasm_longjmp.o obj/src/setjmp/wasm32/wasm_longjmp.lo \
 	obj/src/signal/wasm32/siglongjmp.o obj/src/signal/wasm32/siglongjmp.lo \
-	obj/src/thread/pthread_cancel.o obj/src/thread/pthread_cancel.lo
+	obj/src/thread/pthread_cancel.o obj/src/thread/pthread_cancel.lo \
+	obj/src/time/timer_create.o obj/src/time/timer_create.lo
 $(WASM_SJLJ_OBJS): CFLAGS_ALL += -mllvm -wasm-enable-sjlj
