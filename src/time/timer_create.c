@@ -124,14 +124,27 @@ int timer_create(clockid_t clk, struct sigevent *restrict evp, timer_t *restrict
 		ksev.sigev_signo = SIGTIMER;
 		ksev.sigev_notify = SIGEV_THREAD_ID;
 		ksev.sigev_tid = td->tid;
+#ifdef __wasm__
+		/* The helper's semaphore handshake can overwrite errno (EAGAIN
+		 * while waiting). Translate the original kernel error afterwards. */
+		r = __syscall(SYS_timer_create, clk, &ksev, &timerid);
+		if (r < 0) {
+#else
 		if (syscall(SYS_timer_create, clk, &ksev, &timerid) < 0) {
+#endif
 			timerid = -1;
 			td->cancel = 1;
 		}
 		td->timer_id = timerid;
 		sem_post(&args.sem1);
 		while (sem_wait(&args.sem2));
-		if (timerid < 0) return -1;
+		if (timerid < 0) {
+#ifdef __wasm__
+			return __syscall_ret(r);
+#else
+			return -1;
+#endif
+		}
 		*res = (void *)(INTPTR_MIN | (uintptr_t)td>>1);
 		break;
 	default:
