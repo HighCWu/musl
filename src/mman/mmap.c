@@ -563,6 +563,8 @@ long __wasm_msync(uintptr_t begin, size_t rounded, int flags)
 /* Resident direct mappings need no readahead. DONTNEED must instead erase
  * anonymous contents without releasing the address reservation. File-copy
  * provenance cannot reconstruct the original bytes, so do not discard it.
+ * FREE permits immediate discard: erase now, never mark later writes for a
+ * delayed discard. No physical memory or engine capacity is released here.
  * Validate before mutation while holding the same lock as munmap/mremap. */
 long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 {
@@ -571,7 +573,7 @@ long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 	int error;
 
 	if ((begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
-	    advice < MADV_NORMAL || advice > MADV_DONTNEED ||
+	    ((advice < MADV_NORMAL || advice > MADV_DONTNEED) && advice != MADV_FREE) ||
 	    begin > UINTPTR_MAX - rounded)
 		return -EINVAL;
 	if (!rounded)
@@ -585,8 +587,9 @@ long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 		for (mapping = mappings; mapping; mapping = mapping->next) {
 			uintptr_t start = (uintptr_t)mapping->address;
 			if (start <= cursor && cursor - start < mapping->length) {
-				if (advice == MADV_DONTNEED && mapping->initialized) {
-					error = -EOPNOTSUPP;
+				if ((advice == MADV_DONTNEED || advice == MADV_FREE) &&
+				    mapping->initialized) {
+					error = advice == MADV_FREE ? -EINVAL : -EOPNOTSUPP;
 					goto out_advice;
 				}
 				next = start + mapping->length;
@@ -596,7 +599,7 @@ long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 		if (next == cursor) { error = -ENOMEM; goto out_advice; }
 		cursor = next < end ? next : end;
 	}
-	if (advice == MADV_DONTNEED)
+	if (advice == MADV_DONTNEED || advice == MADV_FREE)
 		memset((void *)begin, 0, rounded);
 out_advice:
 	(void)pthread_mutex_unlock(&mappings_lock);
