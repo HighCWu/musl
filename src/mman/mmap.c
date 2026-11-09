@@ -587,7 +587,7 @@ static long wasm_madvise_fork(uintptr_t begin, size_t rounded, int advice)
 	struct wasm_mapping *begin_split, *end_split, *mapping;
 	uintptr_t cursor, end;
 	long result;
-	int error, wipe;
+	int error, wipe, allocate_begin, allocate_end;
 
 	if ((advice != MADV_WIPEONFORK && advice != MADV_KEEPONFORK) ||
 	    (begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
@@ -636,16 +636,18 @@ retry_fork_advice:
 		cursor = stop < end ? stop : end;
 	}
 
-	if ((begin_split && !begin_spare) || (end_split && !end_spare)) {
+	allocate_begin = begin_split && !begin_spare;
+	allocate_end = end_split && !end_spare;
+	if (allocate_begin || allocate_end) {
 		(void)pthread_mutex_unlock(&mappings_lock);
-		if (begin_split && !begin_spare) {
+		if (allocate_begin) {
 			begin_spare = __libc_malloc(sizeof(*begin_spare));
 			if (!begin_spare) {
 				result = -ENOMEM;
 				goto out_fork_advice;
 			}
 		}
-		if (end_split && !end_spare) {
+		if (allocate_end) {
 			end_spare = __libc_malloc(sizeof(*end_spare));
 			if (!end_spare) {
 				result = -ENOMEM;
