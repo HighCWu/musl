@@ -317,7 +317,7 @@ long __wasm_mmap_v2(uintptr_t address, size_t rounded, int prot, int flags,
  * before locking; then validate, copy, replace and remove the source without
  * a fallible step. A new destination reference protects even shared backing. */
 static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
-		uintptr_t source, size_t old_length)
+		uintptr_t source, size_t old_length, int keep_source)
 {
 	struct wasm_mapping *replacement, *spare, *source_spare, *mapping, **cursor, *removed = 0;
 	struct wasm_allocation *allocation = 0, *source_allocation = 0, *released = 0;
@@ -335,8 +335,10 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 		return -EINVAL;
 	replacement = __libc_malloc(sizeof(*replacement));
 	spare = __libc_malloc(sizeof(*spare));
-	source_spare = old_length ? __libc_malloc(sizeof(*source_spare)) : 0;
-	if (!replacement || !spare || (old_length && !source_spare)) {
+	source_spare = old_length && !keep_source ?
+		__libc_malloc(sizeof(*source_spare)) : 0;
+	if (!replacement || !spare ||
+	    (old_length && !keep_source && !source_spare)) {
 		result = -ENOMEM;
 		goto fixed_out;
 	}
@@ -367,7 +369,7 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 			}
 		}
 		if (!source_allocation) { result = -EFAULT; goto fixed_unlock; }
-		if (initialized && rounded > old_length) {
+		if (initialized && (keep_source || rounded > old_length)) {
 			result = -EOPNOTSUPP;
 			goto fixed_unlock;
 		}
@@ -379,7 +381,9 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 	if (old_length)
 		memcpy((void *)begin, (void *)source,
 			old_length < rounded ? old_length : rounded);
-	for (int pass = 0; pass < (old_length ? 2 : 1); pass++) {
+	if (keep_source)
+		memset((void *)source, 0, old_length);
+	for (int pass = 0; pass < (old_length && !keep_source ? 2 : 1); pass++) {
 		uintptr_t first = pass ? source : begin;
 		uintptr_t last = pass ? source + old_length : end;
 		struct wasm_allocation *owner = pass ? source_allocation : allocation;
@@ -449,7 +453,7 @@ fixed_out:
 
 long __wasm_mmap_fixed(uintptr_t begin, size_t rounded)
 {
-	return wasm_fixed_mapping(begin, rounded, 0, 0);
+	return wasm_fixed_mapping(begin, rounded, 0, 0, 0);
 }
 
 long __wasm_mremap_fixed(uintptr_t source, size_t old_length,
@@ -457,7 +461,7 @@ long __wasm_mremap_fixed(uintptr_t source, size_t old_length,
 {
 	if (!old_length)
 		return -EINVAL;
-	return wasm_fixed_mapping(destination, new_length, source, old_length);
+	return wasm_fixed_mapping(destination, new_length, source, old_length, 0);
 }
 
 long __wasm_munmap(uintptr_t begin, size_t rounded)
@@ -950,6 +954,96 @@ out:
 	__libc_free(removed);
 	__libc_free(released);
 	__libc_free(spare);
+	return result;
+}
+
+/* Private DONTUNMAP ABI. Preserve the original live mapping and replace only
+ * the requested bytes with zeroes after copying them to a disjoint destination.
+ * This is deliberately separate from __wasm_mremap so older hosts and the
+ * established resize ABI continue to reject DONTUNMAP. */
+long __wasm_mremap_dontunmap_v1(uintptr_t source, size_t old_length,
+		size_t new_length, unsigned long flags, uintptr_t destination)
+{
+	const unsigned long required_flags = MREMAP_MAYMOVE | MREMAP_DONTUNMAP;
+	struct wasm_mapping *mapping, *prepared = 0;
+	uintptr_t source_end;
+	int lock_error;
+	long result;
+
+	if ((flags != required_flags && flags != (required_flags | MREMAP_FIXED)) ||
+	    !old_length || old_length != new_length ||
+	    (old_length & (PAGESIZE - 1)) || (source & (PAGESIZE - 1)) ||
+	    source >= (uintptr_t)-4095 || source > UINTPTR_MAX - old_length ||
+	    old_length > SIZE_MAX - PAGESIZE - sizeof(struct wasm_allocation))
+		return -EINVAL;
+	source_end = source + old_length;
+	if (flags & MREMAP_FIXED) {
+		uintptr_t destination_end;
+
+		if (!destination || (destination & (PAGESIZE - 1)) ||
+		    destination >= (uintptr_t)-4095 ||
+		    destination > UINTPTR_MAX - new_length)
+			return -EINVAL;
+		destination_end = destination + new_length;
+		if (destination < source_end && source < destination_end)
+			return -EINVAL;
+		return wasm_fixed_mapping(destination, new_length, source,
+				old_length, 1);
+	}
+
+	/* Prepare backing outside the lock, then re-find the live source interval.
+	 * Metadata-only changes while allocating are allowed; the current record's
+	 * wipe-on-fork state is copied when the operation commits. */
+retry_dontunmap:
+	lock_error = pthread_mutex_lock(&mappings_lock);
+	if (lock_error) {
+		result = lock_error > 0 ? -lock_error : -EINVAL;
+		goto dontunmap_out;
+	}
+	for (mapping = mappings; mapping; mapping = mapping->next) {
+		uintptr_t start = (uintptr_t)mapping->address;
+
+		if (source >= start && old_length <= mapping->length &&
+		    source - start <= mapping->length - old_length)
+			break;
+	}
+	if (!mapping) {
+		result = -EFAULT;
+		goto dontunmap_unlock;
+	}
+	if (mapping->initialized) {
+		result = -EOPNOTSUPP;
+		goto dontunmap_unlock;
+	}
+	if (!prepared) {
+		(void)pthread_mutex_unlock(&mappings_lock);
+		prepared = __libc_malloc(sizeof(*prepared));
+		if (!prepared)
+			return -ENOMEM;
+		result = wasm_prepare_mapping(prepared, new_length, 0, 0);
+		if (result) {
+			__libc_free(prepared);
+			return result;
+		}
+		goto retry_dontunmap;
+	}
+
+	/* The backing is independent and every fallible operation is complete. */
+	memcpy(prepared->address, (void *)source, old_length);
+	memset((void *)source, 0, old_length);
+	prepared->wipe_on_fork = mapping->wipe_on_fork;
+	prepared->next = mappings;
+	mappings = prepared;
+	result = (long)prepared->address;
+	prepared = 0;
+
+dontunmap_unlock:
+	(void)pthread_mutex_unlock(&mappings_lock);
+dontunmap_out:
+	if (prepared) {
+		__libc_free(prepared->allocation);
+		__libc_free(prepared);
+	}
 	return result;
 }
 
