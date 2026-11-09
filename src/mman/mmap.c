@@ -8,6 +8,7 @@
 #include <limits.h>
 #ifdef __wasm__
 #include <pthread.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #endif
@@ -41,10 +42,22 @@ struct wasm_mapping {
 	void *address;
 	size_t length;
 	int initialized;
+	int wipe_on_fork;
 };
 
 static pthread_mutex_t mappings_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct wasm_mapping *mappings;
+
+const uintptr_t __wasm_fork_memory_advice_v1[8] = {
+	1,
+	sizeof(struct wasm_mapping),
+	(uintptr_t)&mappings,
+	offsetof(struct wasm_mapping, next),
+	offsetof(struct wasm_mapping, address),
+	offsetof(struct wasm_mapping, length),
+	offsetof(struct wasm_mapping, initialized),
+	offsetof(struct wasm_mapping, wipe_on_fork),
+};
 
 #define WASM_MMAP_CHUNK_SIZE (8 * PAGESIZE)
 
@@ -156,6 +169,7 @@ static int wasm_try_mmap_existing(uintptr_t requested, size_t rounded,
 	mapping->address = (void *)address;
 	mapping->length = rounded;
 	mapping->initialized = 0;
+	mapping->wipe_on_fork = 0;
 	mapping->next = mappings;
 	mappings = mapping;
 	(void)pthread_mutex_unlock(&mappings_lock);
@@ -207,6 +221,7 @@ static long wasm_prepare_mapping(struct wasm_mapping *mapping, size_t rounded,
 	mapping->address = (void *)address;
 	mapping->length = rounded;
 	mapping->initialized = initialize != 0;
+	mapping->wipe_on_fork = 0;
 	memset(mapping->address, 0, rounded);
 	if (initialize) {
 		int error = initialize(mapping->address, rounded, argument);
@@ -308,7 +323,7 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 	struct wasm_allocation *allocation = 0, *source_allocation = 0, *released = 0;
 	uintptr_t end;
 	long result;
-	int error, initialized = 0;
+	int error, initialized = 0, wipe_on_fork = 0;
 
 	if (!begin || !rounded || (begin & (PAGESIZE - 1)) ||
 	    (rounded & (PAGESIZE - 1)) || begin > UINTPTR_MAX - rounded)
@@ -347,6 +362,7 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 			    source - start <= mapping->length - old_length) {
 				source_allocation = mapping->allocation;
 				initialized = mapping->initialized;
+				wipe_on_fork = mapping->wipe_on_fork;
 				break;
 			}
 		}
@@ -407,6 +423,7 @@ static long wasm_fixed_mapping(uintptr_t begin, size_t rounded,
 	replacement->address = (void *)begin;
 	replacement->length = rounded;
 	replacement->initialized = initialized;
+	replacement->wipe_on_fork = wipe_on_fork;
 	replacement->next = mappings;
 	mappings = replacement;
 	replacement = 0;
@@ -501,6 +518,7 @@ long __wasm_munmap(uintptr_t begin, size_t rounded)
 		spare->address = (void *)end;
 		spare->length = mapping_end - end;
 		spare->initialized = mapping->initialized;
+		spare->wipe_on_fork = mapping->wipe_on_fork;
 		mapping->next = spare;
 		mapping->length = begin - mapping_begin;
 		mapping->allocation->references++;
@@ -560,6 +578,189 @@ long __wasm_msync(uintptr_t begin, size_t rounded, int flags)
 	return error;
 }
 
+/* Fork advice is persistent mapping metadata. Validate full coverage first;
+ * preallocate at most two boundary records outside mappings_lock, then retry
+ * the validation before publishing any split or flag change. */
+static long wasm_madvise_fork(uintptr_t begin, size_t rounded, int advice)
+{
+	struct wasm_mapping *begin_spare = 0, *end_spare = 0, *removed = 0;
+	struct wasm_mapping *begin_split, *end_split, *mapping;
+	uintptr_t cursor, end;
+	long result;
+	int error, wipe;
+
+	if ((advice != MADV_WIPEONFORK && advice != MADV_KEEPONFORK) ||
+	    (begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
+	    begin > UINTPTR_MAX - rounded)
+		return -EINVAL;
+	if (!rounded)
+		return 0;
+	end = begin + rounded;
+	wipe = advice == MADV_WIPEONFORK;
+
+retry_fork_advice:
+	error = pthread_mutex_lock(&mappings_lock);
+	if (error) {
+		result = error > 0 ? -error : -EINVAL;
+		goto out_fork_advice;
+	}
+	begin_split = 0;
+	end_split = 0;
+	cursor = begin;
+	while (cursor < end) {
+		uintptr_t start, stop;
+
+		for (mapping = mappings; mapping; mapping = mapping->next) {
+			start = (uintptr_t)mapping->address;
+			if (start <= cursor && cursor - start < mapping->length)
+				break;
+		}
+		if (!mapping) {
+			result = -ENOMEM;
+			goto unlock_fork_advice;
+		}
+		start = (uintptr_t)mapping->address;
+		if (mapping->length > UINTPTR_MAX - start) {
+			result = -EINVAL;
+			goto unlock_fork_advice;
+		}
+		stop = start + mapping->length;
+		if (advice == MADV_WIPEONFORK && mapping->initialized) {
+			result = -EINVAL;
+			goto unlock_fork_advice;
+		}
+		if (start < begin && begin < stop && mapping->wipe_on_fork != wipe)
+			begin_split = mapping;
+		if (start < end && end < stop && mapping->wipe_on_fork != wipe)
+			end_split = mapping;
+		cursor = stop < end ? stop : end;
+	}
+
+	if ((begin_split && !begin_spare) || (end_split && !end_spare)) {
+		(void)pthread_mutex_unlock(&mappings_lock);
+		if (begin_split && !begin_spare) {
+			begin_spare = __libc_malloc(sizeof(*begin_spare));
+			if (!begin_spare) {
+				result = -ENOMEM;
+				goto out_fork_advice;
+			}
+		}
+		if (end_split && !end_spare) {
+			end_spare = __libc_malloc(sizeof(*end_spare));
+			if (!end_spare) {
+				result = -ENOMEM;
+				goto out_fork_advice;
+			}
+		}
+		goto retry_fork_advice;
+	}
+	if (begin_split) {
+		struct wasm_mapping *right = begin_spare;
+		uintptr_t start = (uintptr_t)begin_split->address;
+		uintptr_t stop = start + begin_split->length;
+
+		begin_spare = 0;
+		*right = *begin_split;
+		right->address = (void *)begin;
+		right->length = stop - begin;
+		right->next = begin_split->next;
+		begin_split->next = right;
+		begin_split->length = begin - start;
+		begin_split->allocation->references++;
+		if (end_split == begin_split)
+			end_split = right;
+	}
+	if (end_split) {
+		struct wasm_mapping *right = end_spare;
+		uintptr_t start = (uintptr_t)end_split->address;
+		uintptr_t stop = start + end_split->length;
+
+		end_spare = 0;
+		*right = *end_split;
+		right->address = (void *)end;
+		right->length = stop - end;
+		right->next = end_split->next;
+		end_split->next = right;
+		end_split->length = end - start;
+		end_split->allocation->references++;
+	}
+	for (mapping = mappings; mapping; mapping = mapping->next) {
+		uintptr_t start = (uintptr_t)mapping->address;
+		uintptr_t stop = start + mapping->length;
+		if (start >= begin && stop <= end)
+			mapping->wipe_on_fork = wipe;
+	}
+
+	/* Rejoin same-backing anonymous records around the advised range. This
+	 * restores a single mremap-able record when advice changes back to KEEP. */
+	for (struct wasm_mapping **cursor_link = &mappings;
+	     (mapping = *cursor_link); ) {
+		uintptr_t start = (uintptr_t)mapping->address;
+		uintptr_t stop = start + mapping->length;
+		int merged;
+
+		if (mapping->initialized || end <= start || begin >= stop) {
+			cursor_link = &mapping->next;
+			continue;
+		}
+		do {
+			struct wasm_mapping **candidate_link;
+			struct wasm_mapping *candidate;
+
+			merged = 0;
+			start = (uintptr_t)mapping->address;
+			stop = start + mapping->length;
+			for (candidate_link = &mappings;
+			     (candidate = *candidate_link); ) {
+				uintptr_t candidate_start, candidate_end;
+
+				if (candidate == mapping || candidate->initialized ||
+				    candidate->allocation != mapping->allocation ||
+				    candidate->wipe_on_fork != mapping->wipe_on_fork) {
+					candidate_link = &candidate->next;
+					continue;
+				}
+				candidate_start = (uintptr_t)candidate->address;
+				candidate_end = candidate_start + candidate->length;
+				if (candidate_end == start) {
+					*candidate_link = candidate->next;
+					candidate->next = removed;
+					removed = candidate;
+					mapping->address = (void *)candidate_start;
+					mapping->length = stop - candidate_start;
+					mapping->allocation->references--;
+					merged = 1;
+					break;
+				}
+				if (stop == candidate_start) {
+					*candidate_link = candidate->next;
+					candidate->next = removed;
+					removed = candidate;
+					mapping->length = candidate_end - start;
+					mapping->allocation->references--;
+					merged = 1;
+					break;
+				}
+				candidate_link = &candidate->next;
+			}
+		} while (merged);
+		cursor_link = &mapping->next;
+	}
+	result = 0;
+
+unlock_fork_advice:
+	(void)pthread_mutex_unlock(&mappings_lock);
+out_fork_advice:
+	__libc_free(begin_spare);
+	__libc_free(end_spare);
+	while (removed) {
+		mapping = removed;
+		removed = mapping->next;
+		__libc_free(mapping);
+	}
+	return result;
+}
+
 /* Resident direct mappings need no readahead. DONTNEED must instead erase
  * anonymous contents without releasing the address reservation. File-copy
  * provenance cannot reconstruct the original bytes, so do not discard it.
@@ -572,6 +773,8 @@ long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 	uintptr_t cursor = begin, end, next;
 	int error;
 
+	if (advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK)
+		return -EOPNOTSUPP;
 	if ((begin & (PAGESIZE - 1)) || (rounded & (PAGESIZE - 1)) ||
 	    ((advice < MADV_NORMAL || advice > MADV_DONTNEED) && advice != MADV_FREE) ||
 	    begin > UINTPTR_MAX - rounded)
@@ -604,6 +807,15 @@ long __wasm_madvise(uintptr_t begin, size_t rounded, int advice)
 out_advice:
 	(void)pthread_mutex_unlock(&mappings_lock);
 	return error;
+}
+
+/* New private advice ABI. Older hosts continue using __wasm_madvise and
+ * explicitly reject WIPEONFORK/KEEPONFORK rather than silently ignoring them. */
+long __wasm_madvise_v2(uintptr_t begin, size_t rounded, int advice)
+{
+	if (advice == MADV_WIPEONFORK || advice == MADV_KEEPONFORK)
+		return wasm_madvise_fork(begin, rounded, advice);
+	return __wasm_madvise(begin, rounded, advice);
 }
 
 /* Internal direct-memory resize; no public libc entry or execution export is
@@ -699,6 +911,7 @@ retry:
 	if (begin > mapping_begin && old_end < mapping_end && !spare)
 		goto prepare_split;
 	memcpy(prepared->address, (void *)begin, old_length);
+	prepared->wipe_on_fork = mapping->wipe_on_fork;
 	if (begin == mapping_begin && old_end == mapping_end) {
 		*cursor = mapping->next;
 		removed = mapping;
