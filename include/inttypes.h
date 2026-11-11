@@ -22,8 +22,12 @@ uintmax_t strtoumax(const char *__restrict, char **__restrict, int);
 intmax_t wcstoimax(const wchar_t *__restrict, wchar_t **__restrict, int);
 uintmax_t wcstoumax(const wchar_t *__restrict, wchar_t **__restrict, int);
 
-#if defined(__wasm__)
-/* Wasm uses long pointers and long long 64-bit integers at both widths. */
+#if defined(__wasm_linux64__)
+/* The explicit Linux wasm64 ABI uses long for 64-bit integers. */
+#define __PRI64  "l"
+#define __PRIPTR "l"
+#elif defined(__wasm__)
+/* Other Wasm ABIs keep long long 64-bit integers. */
 #define __PRI64  "ll"
 #define __PRIPTR "l"
 #elif UINTPTR_MAX == UINT64_MAX

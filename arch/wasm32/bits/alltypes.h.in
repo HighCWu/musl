@@ -1,5 +1,12 @@
 #define _Addr long
+#if defined(__wasm_linux64__)
+#if __SIZEOF_LONG__ != 8 || __SIZEOF_POINTER__ != 8
+#error __wasm_linux64__ requires 64-bit long and pointers
+#endif
+#define _Int64 long
+#else
 #define _Int64 long long
+#endif
 #define _Reg long
 
 #define __BYTE_ORDER 1234
