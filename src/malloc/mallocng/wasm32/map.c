@@ -6,6 +6,8 @@
 
 #include "../meta.h"
 
+hidden void *__wasm_sbrk_aligned(size_t, size_t);
+
 struct free_map {
 	struct free_map *next;
 	size_t len;
@@ -39,7 +41,7 @@ void *__malloc_map_alloc(size_t len)
 			errno = ENOMEM;
 			return (void *)-1;
 		}
-		return sbrk((intptr_t)len);
+		return __wasm_sbrk_aligned(len, UNIT);
 	}
 
 	struct free_map *map = *best;

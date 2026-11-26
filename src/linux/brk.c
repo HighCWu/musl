@@ -114,6 +114,40 @@ void *sbrk(intptr_t inc) {
 }
 #endif
 
+/* Private allocator operation: reserve the complete aligned span without a
+ * separate sbrk(0) query or an independently interleavable padding update. */
+hidden void *__wasm_sbrk_aligned(size_t len, size_t alignment)
+{
+	if (!len || !alignment || (alignment & (alignment-1)) ||
+	    alignment-1 > INTPTR_MAX || len > INTPTR_MAX-(alignment-1)) {
+		errno = ENOMEM;
+		return (void *)-1;
+	}
+	uintptr_t mask = alignment-1;
+
+#ifdef WASM_BRK_SYSCALL
+	/* One public sbrk transaction retains its syscall limit and lock checks.
+	 * The unused prefix/suffix total less than alignment; neither is part of
+	 * the returned span or large enough to form another aligned unit. */
+	void *reservation = sbrk((intptr_t)(len+mask));
+	if (reservation == (void *)-1) return reservation;
+	return (void *)(((uintptr_t)reservation+mask) & ~mask);
+#else
+	if (pthread_mutex_lock(&mutex)) a_crash();
+	uintptr_t old = (uintptr_t)current;
+	void *result = (void *)-1;
+	if (mask > UINTPTR_MAX-old) {
+		errno = ENOMEM;
+	} else {
+		uintptr_t start = (old+mask) & ~mask;
+		if (len > UINTPTR_MAX-start) errno = ENOMEM;
+		else if (!_brk((void *)(start+len))) result = (void *)start;
+	}
+	pthread_mutex_unlock(&mutex);
+	return result;
+#endif
+}
+
 #else
 int brk(void *end)
 {
